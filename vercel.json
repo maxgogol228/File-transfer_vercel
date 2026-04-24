@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/socket.io/:path*",
-      "destination": "https://your-app.onrender.com/socket.io/:path*"
+      "destination": "https://file-transfer-02on.onrender.com/socket.io/:path*"
     },
     {
       "source": "/(.*)",

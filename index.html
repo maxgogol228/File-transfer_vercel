@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>File Transfer Hub</title>
+    <style>
+        /* ВСЕ ВАШИ СТИЛИ ИЗ ПРЕДЫДУЩЕЙ ВЕРСИИ (КОПИРУЙТЕ ПОЛНОСТЬЮ) */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0e27; min-height: 100vh; color: #e0e0e0; }
+        /* ... остальные стили из предыдущей версии ... */
+    </style>
+</head>
+<body>
+    <!-- HTML структура такая же, как в предыдущей версии -->
+    <div class="app-container">
+        <div class="main-content">
+            <div class="container">
+                <div class="header">
+                    <h1>FILE TRANSFER HUB</h1>
+                </div>
+                <!-- остальной HTML -->
+            </div>
+        </div>
+        <div class="chat-sidebar" id="chatSidebar" style="display: none;">
+            <!-- чат -->
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        // ============ КОНФИГУРАЦИЯ ============
+        // Замените на ваш URL от Render
+        const SERVER_URL = 'https://your-app.onrender.com';
+        
+        let socket = null;
+        let currentRoomKey = null;
+        let myUploads = new Map();
+        let roomFiles = new Map();
+        let downloadedFiles = [];
+        let userName = '';
+        let timerInterval = null;
+        const CHUNK_SIZE = 16384;
+
+        // DOM элементы (как в предыдущей версии)
+        // ... все ваши DOM переменные ...
+
+        function initSocket() {
+            socket = io(SERVER_URL, {
+                transports: ['websocket', 'polling'],
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000
+            });
+            
+            socket.on('connect', () => {
+                console.log('Connected to server');
+                showStatus('Connected to server', 'success');
+            });
+
+            socket.on('connect_error', (error) => {
+                console.error('Connection error:', error);
+                showStatus('Server connection error. Retrying...', 'error');
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Disconnected from server');
+                showStatus('Disconnected from server', 'error');
+            });
+
+            // ВСЕ ОСТАЛЬНЫЕ ОБРАБОТЧИКИ СОБЫТИЙ (КОПИРУЙТЕ ИЗ ПРЕДЫДУЩЕЙ ВЕРСИИ)
+            socket.on('peer-joined', (data) => {
+                updatePeerCount(data.clientsCount);
+                updateUsersList(data.users);
+                addChatMessage({ userName: 'System', message: data.message, isSystem: true, timestamp: new Date().toISOString() });
+            });
+
+            socket.on('peer-left', (data) => {
+                updatePeerCount(data.clientsCount);
+                updateUsersList(data.users);
+                addChatMessage({ userName: 'System', message: data.message, isSystem: true, timestamp: new Date().toISOString() });
+            });
+
+            socket.on('chat-message', (message) => {
+                addChatMessage(message);
+            });
+
+            socket.on('chat-history', (messages) => {
+                messages.forEach(msg => addChatMessage(msg));
+            });
+
+            socket.on('file-available', (data) => {
+                if (!roomFiles.has(data.fileId)) {
+                    roomFiles.set(data.fileId, data);
+                    renderAvailableFiles();
+                    showStatus(`New file: ${data.fileName}`, 'success');
+                    addChatMessage({ userName: 'System', message: `${data.senderName || 'User'} shared: ${data.fileName}`, isSystem: true, timestamp: new Date().toISOString() });
+                }
+            });
+
+            socket.on('upload-progress', (data) => {
+                if (myUploads.has(data.fileId)) {
+                    const upload = myUploads.get(data.fileId);
+                    upload.progress = data.progress;
+                    if (data.progress >= 100) upload.status = 'complete';
+                    renderUploadsList();
+                }
+            });
+
+            socket.on('room-expired', (data) => {
+                showStatus(data.message, 'error');
+                setTimeout(() => leaveRoom(), 3000);
+            });
+        }
+
+        // ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (КОПИРУЙТЕ ИЗ ПРЕДЫДУЩЕЙ ВЕРСИИ)
+        function updateUsersList(users) {
+            if (users && users.length) {
+                const names = users.map(u => u.name).join(', ');
+                usersList.innerHTML = `Users (${users.length}): <span>${escapeHtml(names)}</span>`;
+            }
+        }
+
+        function connectToRoom() {
+            const roomKey = roomKeyInput.value.trim();
+            const nick = userNameInput.value.trim();
+            
+            if (!nick) {
+                showStatus('Please enter your nickname', 'error');
+                return;
+            }
+            if (!roomKey) {
+                showStatus('Please enter a room key', 'error');
+                return;
+            }
+            
+            userName = nick;
+            localStorage.setItem('lastUserName', userName);
+            
+            if (!socket || !socket.connected) {
+                initSocket();
+                setTimeout(() => performJoin(roomKey), 1000);
+            } else {
+                performJoin(roomKey);
+            }
+        }
+
+        function performJoin(roomKey) {
+            showStatus('Connecting...', 'info');
+            
+            socket.emit('join-room', { roomKey, userName }, (response) => {
+                if (response.success) {
+                    currentRoomKey = roomKey;
+                    currentRoomKeyEl.textContent = roomKey;
+                    updatePeerCount(response.clientsCount);
+                    updateUsersList(response.users);
+                    
+                    if (response.files && response.files.length > 0) {
+                        response.files.forEach(file => roomFiles.set(file.fileId, file));
+                        renderAvailableFiles();
+                    }
+                    
+                    connectionPanel.style.display = 'none';
+                    mainInterface.style.display = 'block';
+                    chatSidebar.style.display = 'flex';
+                    
+                    showStatus(`Connected to: ${roomKey}`, 'success');
+                    setupFileTransfer();
+                    startTimer(response.expiresIn);
+                } else if (response.error === 'Room expired') {
+                    showStatus('Room has expired (1 hour limit). Create a new room.', 'error');
+                } else {
+                    showStatus('Failed to connect', 'error');
+                }
+            });
+        }
+
+        // ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (КОПИРУЙТЕ ПОЛНОСТЬЮ)
+        // ... uploadFiles, downloadFile, renderUploadsList и т.д. ...
+        // (скопируйте все функции из предыдущей рабочей версии)
+
+        // Инициализация
+        connectBtn.onclick = connectToRoom;
+        roomKeyInput.onkeypress = (e) => { if (e.key === 'Enter') connectToRoom(); };
+        userNameInput.onkeypress = (e) => { if (e.key === 'Enter') connectToRoom(); };
+        
+        const savedName = localStorage.getItem('lastUserName');
+        if (savedName) userNameInput.value = savedName;
+
+        initSocket();
+    </script>
+</body>
+</html>
